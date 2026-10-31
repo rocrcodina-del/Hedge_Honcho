@@ -24,7 +24,7 @@ input,button{font:inherit;padding:6px 10px;border-radius:8px}
 </head>
 <body>
 <canvas id="c" width="640" height="480"></canvas>
-<div id="lobby"><input id="code" placeholder="codi de sala" maxlength="20" autocapitalize="off"><button id="join">Multijugador</button><button id="ready" hidden>Llest!</button><span id="info"></span></div>
+<div id="lobby"><input id="code" placeholder="codi de sala" maxlength="20" autocapitalize="off"><button id="create">Crear sala</button><button id="join">Unir-se</button><button id="start" hidden>Començar</button><span id="info"></span></div>
 <p>Arrossega la mata de pèl de dalt cap a on indica la fletxa (8 direccions). Si hi ha caca enredada als pèls, frega-la fins que marxi.</p>
 <script>
 /* ===== DISSENY: canvia només aquest bloc per reambientar el joc ===== */
@@ -182,8 +182,8 @@ function text(s,x,y,size,align){
   ctx.fillStyle='rgba(0,0,0,.5)';ctx.fillText(s,x+2,y+2);ctx.fillStyle='#fff';ctx.fillText(s,x,y);
 }
 
-/* ===== MULTIJUGADOR amb Trystero (WebRTC entre mòbils, sense servidor propi) ===== */
-let room=null,round=0,lobbyMsg='',code='';
+/* ===== MULTIJUGADOR amb Trystero: un jugador crea la sala i els altres s'hi uneixen; el creador comença la partida ===== */
+let room=null,round=0,lobbyMsg='',lobbyMsg2='',code='',isHost=false,synced=false,waiting=true,joinTimer=0;
 const $=id=>document.getElementById(id);
 const APP_ID='hedge-honcho-9f3a7c';
 async function connect(name){
@@ -203,45 +203,69 @@ async function connect(name){
   return{
     presence(p){mine=p;send(p);return Promise.resolve()},
     peers(){return[{isMe:true,presence:mine},...Object.values(others).map(p=>({isMe:false,presence:p}))]},
-    onPeers(h){hs.push(h)}
+    onPeers(h){hs.push(h)},
+    leave(){try{r.leave()}catch(e){}}
   };
 }
-function pres(p){if(room)room.presence({round,...p}).catch(()=>{})}
+function pres(p){if(room)room.presence({round,host:isHost,...p}).catch(()=>{})}
 const others=()=>room?room.peers().filter(p=>!p.isMe&&p.presence.round===round):[];
 function finish(){myT=t;done=true;if(room){pres({s:'done',t:myT});judge()}else result='win'}
 function judge(){
-  if(!room||result==='lose')return;
+  if(!room||waiting||result==='lose')return;
   const fin=others().filter(p=>p.presence.s==='done');
   if(done&&myT)result=fin.some(p=>p.presence.t<myT)?'lose':'win';
   else if(fin.length){result='lose';done=true}
 }
 function again(){
   if(!room){reset();return}
-  round++;done=true;result=null;lobbyMsg='Prem «Llest!»';$('ready').hidden=false;$('ready').disabled=false;pres({s:'wait'});
+  waiting=true;done=true;result=null;myT=0;updateLobby();
 }
-function tryStart(){
-  if(!room||!done||result)return;
-  const all=room.peers().filter(p=>p.presence.round===round);
-  if(all.length>=2&&all.every(p=>p.presence.s==='ready')){
-    let h=0;for(const ch of code+round)h=(h*31+ch.charCodeAt(0))|0;
-    $('ready').hidden=true;reset(h);pres({s:'play'});
+function startRound(){
+  let h=0;for(const ch of code+round)h=(h*31+ch.charCodeAt(0))|0;
+  waiting=false;myT=0;reset(h);pres({s:'play'});updateLobby();
+}
+function updateLobby(){
+  if(!room)return;
+  const n=room.peers().length,cd=code.slice(3).toUpperCase();
+  $('info').textContent=n+' jugador(s)'+(isHost?' · codi '+cd:'');
+  lobbyMsg=isHost?'Codi de sala: '+cd:'Esperant el creador…';
+  lobbyMsg2=isHost?(n<2?'Esperant jugadors…':n+' jugadors a la sala'):(synced?n+' jugadors a la sala':'');
+  $('start').hidden=!(isHost&&done);
+  $('start').disabled=n<2;
+}
+function onPeersChange(){
+  judge();
+  if(!isHost){
+    const h=room.peers().find(p=>!p.isMe&&p.presence.host);
+    if(h){
+      if(!synced){synced=true;clearTimeout(joinTimer);round=h.presence.round|0;pres({s:'wait'})}
+      else if(h.presence.s==='play'&&h.presence.round>round){round=h.presence.round;startRound()}
+    }else if(synced){lobbyMsg2='El creador ha sortit'}
   }
+  updateLobby();
+  if(!isHost&&synced&&!room.peers().some(p=>!p.isMe&&p.presence.host))lobbyMsg2='El creador ha sortit';
 }
-$('ready').onclick=()=>{
-  round=Math.max(round,...room.peers().map(p=>+p.presence.round||0));
-  $('ready').disabled=true;lobbyMsg='Esperant els altres…';pres({s:'ready'});tryStart();
-};
-$('join').onclick=async()=>{
-  const nm='hh-'+($('code').value||'sala').toLowerCase().replace(/[^a-z0-9_.-]/g,'-').slice(0,40);
-  $('info').textContent='Connectant…';$('join').disabled=true;
+function lobbyUI(){$('code').hidden=$('create').hidden=$('join').hidden=true}
+async function enter(host){
+  const raw=host?Array.from({length:4},()=>'abcdefghjkmnpqrstuvwxyz23456789'[Math.floor(Math.random()*31)]).join(''):$('code').value.trim().toLowerCase().replace(/[^a-z0-9_.-]/g,'-').slice(0,20);
+  if(!raw){$('info').textContent='Escriu el codi de la sala';return}
+  $('info').textContent='Connectant…';$('create').disabled=$('join').disabled=true;
   try{
-    room=await connect(nm);code=nm;
-    room.onPeers(()=>{judge();tryStart();$('info').textContent=room.peers().length+' jugador(s)'});
-    round=0;done=true;result=null;lobbyMsg='Prem «Llest!»';
-    $('info').textContent='1 jugador(s)';
-    $('ready').hidden=false;$('join').hidden=true;$('code').hidden=true;pres({s:'wait'});
-  }catch(e){room=null;$('join').disabled=false;$('info').textContent='No he pogut entrar a la sala (cal internet)'}
-};
+    room=await connect('hh-'+raw);code='hh-'+raw;isHost=host;synced=host;waiting=true;
+    room.onPeers(onPeersChange);
+    round=0;done=true;result=null;myT=0;
+    lobbyUI();pres({s:'wait'});updateLobby();
+    if(!host)joinTimer=setTimeout(()=>{
+      if(synced)return;
+      room.leave();room=null;done=false;reset();
+      $('code').hidden=$('create').hidden=$('join').hidden=false;$('create').disabled=$('join').disabled=false;
+      $('info').textContent='No he trobat la sala. Comprova el codi.';
+    },8000);
+  }catch(e){room=null;$('create').disabled=$('join').disabled=false;$('info').textContent='No he pogut connectar (cal internet)'}
+}
+$('create').onclick=()=>enter(true);
+$('join').onclick=()=>enter(false);
+$('start').onclick=()=>{if(!room||!isHost||room.peers().length<2)return;round++;startRound()};
 
 let last=performance.now();
 function frame(now){
@@ -261,7 +285,7 @@ function frame(now){
     if(tp.bug)poop(c);else if(!holding)arrow(tp.d,c);
     text(`${t.toFixed(1)}s`+(tp.bug?`  ${THEME.texts.rub} ${rubs}/${RUBS}`:''),W-12,28,22,'right');
   }else{
-    if(wait){text(lobbyMsg,W/2,H/2,26,'center')}else{text(result==='lose'?THEME.texts.lose:THEME.texts.win,W/2,60,34,'center');
+    if(wait){text(lobbyMsg,W/2,H/2,26,'center');if(lobbyMsg2)text(lobbyMsg2,W/2,H/2+36,20,'center')}else{text(result==='lose'?THEME.texts.lose:THEME.texts.win,W/2,60,34,'center');
     text(`${t.toFixed(2)}s`,W/2,100,26,'center');
     text(THEME.texts.again,W/2,H-24,20,'center');}
   }
